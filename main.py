@@ -132,7 +132,11 @@ def schedule_scrape():
         scrape_all()
         time.sleep(60)
 
-@app.before_first_request
+@app.before_serving
+async def startup():
+    await scrape_participants()
+    await scrape_events()
+
 def on_start():
     print("🚀 Initial scrape on startup")
     threading.Thread(target=schedule_scrape, daemon=True).start()

@@ -1,14 +1,10 @@
-# fly.toml for fly-scraper
 app = "fly-scraper"
-primary_region = "iad"  # or your nearest Fly region
+primary_region = "atl"
 
 [build]
-  # Uses the default Dockerfile if present, or a builder if using Python directly
 
 [env]
   PYTHONUNBUFFERED = "1"
-  # Optional: Configure environment variables if needed
-  # FLASK_ENV = "production"
 
 [http_service]
   internal_port = 8080
@@ -17,12 +13,6 @@ primary_region = "iad"  # or your nearest Fly region
   auto_start_machines = true
   min_machines_running = 1
 
-# Optional: Volume for data persistence
 [[mounts]]
   source = "scraper_volume"
   destination = "/app/persist"
-"
-
-[[mounts]]
-  source = "boat_images"
-  destination = "/app/static/images/boats"

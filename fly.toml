@@ -6,9 +6,10 @@ primary_region = "atl"
 [env]
 PORT = "8080"
 
-[[mounts]]
-source = "vol_vdm5xp89n3dqgn3v"
-destination = "/app/persist"
+[mounts]
+  source = "data"
+  destination = "/data"
+
 
 [experimental]
 auto_rollback = true

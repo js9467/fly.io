@@ -2,33 +2,33 @@ import os
 import json
 import time
 import threading
-from flask import Flask, jsonify, send_from_directory
 import requests
+from flask import Flask, jsonify, send_from_directory
 from bs4 import BeautifulSoup
 from datetime import datetime
 
 app = Flask(__name__)
 DATA_DIR = "/data"
-
 SETTINGS_URL = "https://js9467.github.io/Brtourney/settings.json"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+os.makedirs(DATA_DIR, exist_ok=True)
 
 def normalize(name):
     return ''.join(c for c in name.lower().replace(" ", "_") if c.isalnum() or c == "_")
 
-
 def load_settings():
     try:
-        response = requests.get(SETTINGS_URL, timeout=10)
-        return response.json()
+        res = requests.get(SETTINGS_URL, headers=HEADERS, timeout=10)
+        return res.json()
     except Exception as e:
-        print(f"❌ Failed to load settings: {e}")
+        print(f"❌ Failed to load settings.json: {e}")
         return {}
 
-
-def scrape_participants(uid, url):
+def scrape_participants(tid, url):
     try:
-        res = requests.get(url, timeout=15)
+        print(f"🔍 Scraping participants for {tid} from {url}")
+        res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
         boats = []
 
@@ -41,52 +41,52 @@ def scrape_participants(uid, url):
                 continue
 
             boat_name = name
-            boat_type = "Boat"
             uid = normalize(boat_name)
-
-            img = div.select_one("img")
-            img_url = img["src"] if img else None
-            if img_url and img_url.startswith("/"):
+            img_tag = div.select_one("img")
+            img_url = img_tag["src"] if img_tag else ""
+            if img_url.startswith("/"):
                 img_url = "https://www.reeltimeapps.com" + img_url
 
             boats.append({
                 "boat": boat_name,
-                "type": boat_type,
+                "type": "Boat",
                 "uid": uid,
-                "image_path": img_url or ""
+                "image_path": img_url
             })
 
-        out_path = os.path.join(DATA_DIR, f"{uid}_participants.json")
+        out_path = os.path.join(DATA_DIR, f"{tid}_participants.json")
         with open(out_path, "w") as f:
             json.dump(boats, f, indent=2)
-        print(f"✅ {len(boats)} participants saved to {out_path}")
-        return boats
+        print(f"✅ Saved {len(boats)} participants to {out_path}")
     except Exception as e:
-        print(f"❌ Error scraping participants: {e}")
-        return []
+        print(f"❌ Error scraping participants for {tid}: {e}")
 
-
-def scrape_events(uid, url):
+def scrape_events(tid, url):
     try:
-        res = requests.get(url, timeout=15)
+        print(f"🔍 Scraping events for {tid} from {url}")
+        res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
         events = []
 
-        for item in soup.select("li.event"):
-            ts_tag = item.select_one("p.pull-right")
-            boat_tag = item.select_one("h4.montserrat")
-            details_tag = item.select_one("p > strong")
+        for li in soup.select("li.event"):
+            ts_tag = li.select_one("p.pull-right")
+            boat_tag = li.select_one("h4.montserrat")
+            detail_tag = li.select_one("p > strong")
 
-            if not (ts_tag and boat_tag and details_tag):
+            if not (ts_tag and boat_tag and detail_tag):
                 continue
 
-            raw_ts = ts_tag.get_text(strip=True)
+            raw_time = ts_tag.get_text(strip=True)
             boat = boat_tag.get_text(strip=True)
-            details = details_tag.get_text(strip=True)
+            details = detail_tag.get_text(strip=True)
 
-            ts = datetime.strptime(raw_ts, "%I:%M %p").replace(year=2025, month=6, day=14)
+            try:
+                ts = datetime.strptime(raw_time, "%I:%M %p").replace(year=2025, month=6, day=14)
+            except:
+                continue
+
             event_type = "Boated" if "boated" in details.lower() else (
-                         "Released" if "released" in details.lower() else "Other")
+                "Released" if "released" in details.lower() else "Other")
 
             events.append({
                 "timestamp": ts.isoformat(),
@@ -96,69 +96,72 @@ def scrape_events(uid, url):
                 "details": details
             })
 
-        out_path = os.path.join(DATA_DIR, f"{uid}_events.json")
+        out_path = os.path.join(DATA_DIR, f"{tid}_events.json")
         with open(out_path, "w") as f:
             json.dump(events, f, indent=2)
-        print(f"✅ {len(events)} events saved to {out_path}")
-        return events
+        print(f"✅ Saved {len(events)} events to {out_path}")
     except Exception as e:
-        print(f"❌ Error scraping events: {e}")
-        return []
-
+        print(f"❌ Error scraping events for {tid}: {e}")
 
 def scrape_all():
     settings = load_settings()
-    for name, data in settings.items():
-        if not isinstance(data, dict):
+    for name, val in settings.items():
+        if not isinstance(val, dict):
             continue
-        uid = normalize(name)
-
-        if "participants" in data and data["participants"]:
-            scrape_participants(uid, data["participants"])
-        if "events" in data and data["events"]:
-            scrape_events(uid, data["events"])
-
+        tid = normalize(name)
+        if "participants" in val and val["participants"]:
+            scrape_participants(tid, val["participants"])
+        if "events" in val and val["events"]:
+            scrape_events(tid, val["events"])
 
 @app.route("/scrape/participants")
-def scrape_participants_route():
-    scrape_all()
+def manual_participants():
+    settings = load_settings()
+    for name, val in settings.items():
+        tid = normalize(name)
+        if "participants" in val and val["participants"]:
+            scrape_participants(tid, val["participants"])
     return jsonify({"status": "Participants scraped"})
 
-
 @app.route("/scrape/events")
-def scrape_events_route():
-    scrape_all()
+def manual_events():
+    settings = load_settings()
+    for name, val in settings.items():
+        tid = normalize(name)
+        if "events" in val and val["events"]:
+            scrape_events(tid, val["events"])
     return jsonify({"status": "Events scraped"})
 
-
 @app.route("/data/<filename>")
-def serve_data(filename):
+def get_data(filename):
     return send_from_directory(DATA_DIR, filename)
 
+def run_schedulers():
+    def event_loop():
+        while True:
+            print("⏱ Scheduled event scrape...")
+            settings = load_settings()
+            for name, val in settings.items():
+                tid = normalize(name)
+                if "events" in val and val["events"]:
+                    scrape_events(tid, val["events"])
+            time.sleep(90)
 
-def periodic_scrape():
-    count = 0
-    while True:
-        print("⏱ Periodic scrape starting...")
-        settings = load_settings()
-        for name, data in settings.items():
-            if not isinstance(data, dict):
-                continue
-            uid = normalize(name)
-            if count % 240 == 0 and "participants" in data and data["participants"]:
-                scrape_participants(uid, data["participants"])
-            if "events" in data and data["events"]:
-                scrape_events(uid, data["events"])
-        count += 1
-        time.sleep(90)
+    def participant_loop():
+        while True:
+            print("⏱ Scheduled participant scrape...")
+            settings = load_settings()
+            for name, val in settings.items():
+                tid = normalize(name)
+                if "participants" in val and val["participants"]:
+                    scrape_participants(tid, val["participants"])
+            time.sleep(21600)  # 6 hours
 
-
-def on_start():
-    print("🚀 Initial scrape on startup")
-    threading.Thread(target=periodic_scrape, daemon=True).start()
-
+    threading.Thread(target=event_loop, daemon=True).start()
+    threading.Thread(target=participant_loop, daemon=True).start()
 
 if __name__ == "__main__":
-    os.makedirs(DATA_DIR, exist_ok=True)
-    on_start()
+    print("🚀 Boot scrape...")
+    scrape_all()
+    run_schedulers()
     app.run(host="0.0.0.0", port=8080)

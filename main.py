@@ -126,6 +126,8 @@ def scrape_all_participants():
     return jsonify(results)
 
 
+from dateutil import parser as date_parser
+
 @app.route("/scrape/events")
 def scrape_all_events():
     settings = fetch_settings()
@@ -145,46 +147,66 @@ def scrape_all_events():
             res = requests.get(url, timeout=15)
             soup = BeautifulSoup(res.text, "html.parser")
             events = []
+            seen = set()
 
-            for el in soup.select(".feed-list-item, .event"):
-                time_tag = el.select_one(".feed-time, .time, .timestamp")
-                timestamp = time_tag.text.strip() if time_tag else datetime.utcnow().isoformat()
+            # Load participants if available (for display name)
+            participants_path = os.path.join(DATA_FOLDER, f"{normalize(key)}_participants.json")
+            participants = {}
+            if os.path.exists(participants_path):
+                with open(participants_path) as f:
+                    pdata = json.load(f)
+                    participants = {p["uid"]: p for p in pdata.get("participants", [])}
 
-                boat_tag = el.select_one(".feed-boat, .boat, .title")
-                boat = boat_tag.text.strip() if boat_tag else "Unknown"
+            for el in soup.select("article.m-b-20, article.entry, div.activity, li.event, div.feed-item"):
+                time_tag = el.select_one("p.pull-right")
+                boat_tag = el.select_one("h4.montserrat")
+                desc_tag = el.select_one("p > strong")
+
+                if not time_tag or not boat_tag or not desc_tag:
+                    continue
+
+                raw_time = time_tag.get_text(strip=True).replace("@", "").strip()
+                try:
+                    ts = date_parser.parse(raw_time).replace(year=datetime.now().year).isoformat()
+                except:
+                    continue
+
+                boat = boat_tag.get_text(strip=True)
+                desc = desc_tag.get_text(strip=True)
                 uid = normalize(boat)
 
-                details_tag = el.select_one(".feed-description, .details, p")
-                details = details_tag.text.strip() if details_tag else el.get_text(strip=True)
+                # Resolve boat name if in participants
+                if uid in participants:
+                    boat = participants[uid]["boat"]
 
-                lower_details = details.lower()
-                if "released" in lower_details:
+                if "released" in desc.lower():
                     event_type = "Released"
-                elif "pulled hook" in lower_details:
-                    event_type = "Pulled Hook"
-                elif "boated" in lower_details or "headed to scales" in lower_details:
+                elif "boated" in desc.lower():
                     event_type = "Boated"
-                elif "wrong species" in lower_details:
+                elif "pulled hook" in desc.lower():
+                    event_type = "Pulled Hook"
+                elif "wrong species" in desc.lower():
                     event_type = "Wrong Species"
                 else:
                     event_type = "Other"
 
-                try:
-                    dt = datetime.strptime(timestamp, "%I:%M %p")
-                    timestamp_iso = datetime.utcnow().replace(hour=dt.hour, minute=dt.minute, second=0, microsecond=0).isoformat()
-                except:
-                    timestamp_iso = datetime.utcnow().isoformat()
+                key_id = f"{uid}_{event_type}_{ts}"
+                if key_id in seen:
+                    continue
+                seen.add(key_id)
 
                 events.append({
-                    "timestamp": timestamp_iso,
+                    "timestamp": ts,
                     "event": event_type,
                     "boat": boat,
                     "uid": uid,
-                    "details": details
+                    "details": desc
                 })
 
+            events.sort(key=lambda e: e["timestamp"])
             path = os.path.join(DATA_FOLDER, f"{normalize(key)}_events.json")
             save_json(path, {"events": events, "timestamp": datetime.utcnow().isoformat()})
+
             results[key] = f"{len(events)} events saved."
         except Exception as e:
             results[key] = f"❌ Failed: {str(e)}"

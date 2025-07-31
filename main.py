@@ -8,11 +8,9 @@ from urllib.parse import urljoin
 
 app = Flask(__name__)
 
-# Fly volume paths
+# Fly-mounted volume paths
 DATA_FOLDER = "/app/data"
 IMAGE_FOLDER = "/app/static/images/boats"
-
-# Ensure folders exist
 os.makedirs(DATA_FOLDER, exist_ok=True)
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
 
@@ -24,7 +22,15 @@ def normalize(name):
 
 
 def fetch_settings():
-    return requests.get(SETTINGS_URL, timeout=10).json()
+    try:
+        res = requests.get(SETTINGS_URL, timeout=10)
+        res.raise_for_status()
+        data = res.json()
+        print(f"✅ Loaded settings for: {list(data.keys())}")
+        return data
+    except Exception as e:
+        print(f"❌ Error fetching settings: {e}")
+        return {}
 
 
 def save_json(path, data):
@@ -44,7 +50,8 @@ def download_image(img_url, uid):
                 with open(file_path, 'wb') as f:
                     f.write(resp.content)
         return f"/static/images/boats/{uid}.{ext}"
-    except:
+    except Exception as e:
+        print(f"❌ Image download failed for {uid}: {e}")
         return "/static/images/boats/default.jpg"
 
 
@@ -59,8 +66,13 @@ def scrape_all_participants():
     results = {}
 
     for key, entry in settings.items():
+        if not entry or not isinstance(entry, dict):
+            results[key] = "❌ Skipped: invalid entry"
+            continue
+
         url = entry.get("participants")
         if not url:
+            results[key] = "❌ Skipped: no participants URL"
             continue
 
         try:
@@ -110,8 +122,13 @@ def scrape_all_events():
     results = {}
 
     for key, entry in settings.items():
+        if not entry or not isinstance(entry, dict):
+            results[key] = "❌ Skipped: invalid entry"
+            continue
+
         url = entry.get("events")
         if not url:
+            results[key] = "❌ Skipped: no events URL"
             continue
 
         try:

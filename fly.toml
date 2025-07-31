@@ -19,8 +19,9 @@ primary_region = "iad"  # or your nearest Fly region
 
 # Optional: Volume for data persistence
 [[mounts]]
-  source = "scraper_data"
-  destination = "/app/data"
+  source = "scraper_volume"
+  destination = "/app/persist"
+"
 
 [[mounts]]
   source = "boat_images"

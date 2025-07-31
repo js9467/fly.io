@@ -62,21 +62,36 @@ def scrape_events(tournament, url):
         html = requests.get(url, timeout=20).text
         soup = BeautifulSoup(html, 'html.parser')
         events = []
-        for article in soup.select("article, div.feed-item, li.event"):
+        for article in soup.select("article, div.feed-item, li.event, div.activity"):
             time_tag = article.select_one("p.pull-right")
             name_tag = article.select_one("h4, .montserrat")
             desc_tag = article.select_one("p > strong")
-            if not time_tag or not name_tag or not desc_tag: continue
-            raw = time_tag.get_text(strip=True).replace("@", "")
+            if not name_tag or not desc_tag:
+                continue
+
+            if time_tag:
+                raw_time = time_tag.get_text(strip=True).replace("@", "")
+                try:
+                    timestamp = datetime.strptime(raw_time, "%I:%M %p").replace(
+                        year=datetime.now().year,
+                        month=datetime.now().month,
+                        day=datetime.now().day
+                    ).isoformat()
+                except:
+                    timestamp = datetime.now().isoformat()
+            else:
+                timestamp = datetime.now().isoformat()
+
             boat = name_tag.get_text(strip=True)
             desc = desc_tag.get_text(strip=True)
             uid = normalize(boat)
+
             event_type = "Other"
             if "released" in desc.lower(): event_type = "Released"
             elif "boated" in desc.lower(): event_type = "Boated"
             elif "pulled hook" in desc.lower(): event_type = "Pulled Hook"
             elif "wrong species" in desc.lower(): event_type = "Wrong Species"
-            timestamp = datetime.now().isoformat()
+
             events.append({
                 "timestamp": timestamp,
                 "event": event_type,
@@ -84,6 +99,7 @@ def scrape_events(tournament, url):
                 "uid": uid,
                 "details": desc
             })
+
         path = get_cache_path(tournament, "events")
         with open(path, "w") as f:
             json.dump(events, f, indent=2)
@@ -91,36 +107,51 @@ def scrape_events(tournament, url):
     except Exception as e:
         print(f"❌ Failed to scrape events for {tournament}: {e}")
 
-def periodic_scraper():
+def scrape_all_now():
+    print("🚀 Running initial full scrape")
+    settings = load_settings()
+    for name, entry in settings.items():
+        if entry.get("participants"):
+            scrape_participants(name, entry["participants"])
+        if entry.get("events"):
+            scrape_events(name, entry["events"])
+    print("✅ Initial scrape complete.")
+
+def background_scheduler():
+    scrape_all_now()  # Initial scrape on boot
     while True:
         settings = load_settings()
-        now = datetime.now()
         for name, entry in settings.items():
             if not isinstance(entry, dict): continue
             p_path = get_cache_path(name, "participants")
             e_path = get_cache_path(name, "events")
-            if entry.get("participants") and not is_fresh(p_path, 360):  # 6 hrs
+
+            if entry.get("participants") and not is_fresh(p_path, 360):
                 scrape_participants(name, entry["participants"])
-            if entry.get("events") and not is_fresh(e_path, 1.5):  # 90 seconds
+            if entry.get("events") and not is_fresh(e_path, 1.5):
                 scrape_events(name, entry["events"])
         time.sleep(30)
-
-@app.route("/api/<tournament>/participants")
-def api_participants(tournament):
-    path = get_cache_path(tournament, "participants")
-    if not os.path.exists(path): return jsonify({"status": "error", "message": "No data"}), 404
-    with open(path) as f: return jsonify(json.load(f))
-
-@app.route("/api/<tournament>/events")
-def api_events(tournament):
-    path = get_cache_path(tournament, "events")
-    if not os.path.exists(path): return jsonify({"status": "error", "message": "No data"}), 404
-    with open(path) as f: return jsonify(json.load(f))
 
 @app.route("/")
 def index():
     return jsonify({"status": "ok", "message": "Tournament Scraper API"})
 
+@app.route("/api/<tournament>/participants")
+def api_participants(tournament):
+    path = get_cache_path(tournament, "participants")
+    if not os.path.exists(path):
+        return jsonify({"status": "error", "message": "No participant data"}), 404
+    with open(path) as f:
+        return jsonify(json.load(f))
+
+@app.route("/api/<tournament>/events")
+def api_events(tournament):
+    path = get_cache_path(tournament, "events")
+    if not os.path.exists(path):
+        return jsonify({"status": "error", "message": "No event data"}), 404
+    with open(path) as f:
+        return jsonify(json.load(f))
+
 if __name__ == "__main__":
-    Thread(target=periodic_scraper, daemon=True).start()
+    Thread(target=background_scheduler, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

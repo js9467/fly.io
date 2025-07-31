@@ -29,112 +29,109 @@ def load_settings():
     return r.json()
 
 # === Scraping Functions ===
-def scrape_participants(tournament_name, participants_url):
+import os
+import requests
+from bs4 import BeautifulSoup
+import json
+from datetime import datetime
+
+def normalize_boat_name(name):
+    return ''.join(c.lower() if c.isalnum() else '_' for c in name).strip('_')
+
+def scrape_participants(name, url):
+    print(f"📡 Scraping participants for {name} from {url}")
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     try:
-        html = requests.get(participants_url, timeout=20).text
-        soup = BeautifulSoup(html, "html.parser")
-        entries = []
-        for row in soup.select(".participant-row, div.row"):
-            boat_tag = row.select_one(".participant-boat, h4")
-            type_tag = row.select_one(".participant-type, p")
-            img_tag = row.select_one("img")
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"⚠️ Failed to fetch participants for {name}")
+            return []
 
-            if not boat_tag:
-                continue
+        soup = BeautifulSoup(response.text, "html.parser")
+        participants = []
+        cards = soup.select("div.card")  # Confirm this still matches
 
-            boat = boat_tag.get_text(strip=True)
-            type_ = type_tag.get_text(strip=True) if type_tag else ""
-            uid = normalize(boat)
-            image_url = img_tag["src"] if img_tag and "src" in img_tag.attrs else ""
+        for card in cards:
+            boat = card.select_one("h4")
+            if boat:
+                boat_name = boat.get_text(strip=True)
+                if any(x in boat_name.lower() for x in ["angler", "junior", "lady", "mate"]):
+                    continue  # Skip non-boat entries
+                uid = normalize_boat_name(boat_name)
+                type_ = card.select_one("div.card-text")
+                participants.append({
+                    "uid": uid,
+                    "boat": boat_name,
+                    "type": type_.get_text(strip=True) if type_ else "",
+                    "image_path": f"/static/images/boats/{uid}.jpg"
+                })
 
-            # Image handling
-            ext = os.path.splitext(image_url)[-1] or ".jpg"
-            image_path = f"{STATIC_IMAGE_PATH}/{uid}{ext}"
-            local_path = f"static/images/boats/{uid}{ext}"
-            os.makedirs("static/images/boats", exist_ok=True)
+        print(f"✅ Scraped {len(participants)} participants for {name}")
+        os.makedirs(f"data/{name}", exist_ok=True)
+        with open(f"data/{name}/participants.json", "w") as f:
+            json.dump(participants, f, indent=2)
+        return participants
 
-            if image_url and not os.path.exists(local_path):
-                try:
-                    img_data = requests.get(image_url, timeout=10).content
-                    with open(local_path, "wb") as f:
-                        f.write(img_data)
-                except Exception as e:
-                    print(f"⚠️ Failed to download image for {boat}: {e}")
-                    image_path = f"{STATIC_IMAGE_PATH}/default.jpg"
-
-            entries.append({
-                "uid": uid,
-                "boat": boat,
-                "type": type_,
-                "image_path": image_path
-            })
-
-        with open(get_cache_path(tournament_name, "participants"), "w") as f:
-            json.dump(entries, f, indent=2)
-        print(f"✅ Scraped {len(entries)} participants for {tournament_name}")
     except Exception as e:
-        print(f"❌ Error scraping participants for {tournament_name}: {e}")
+        print(f"❌ Error scraping participants for {name}: {e}")
+        return []
 
-def scrape_events(tournament, url, participants):
+def scrape_events(name, url, participants):
+    print(f"📡 Scraping events for {name} from {url}")
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     try:
-        print(f"📡 Scraping events for {tournament} from {url}")
-        html = requests.get(url, timeout=20).text
-        soup = BeautifulSoup(html, 'html.parser')
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"⚠️ Failed to fetch events for {name}")
+            return []
 
-        # Debug: log number of matched articles
-        articles = soup.select("article, div.feed-item, li.event, div.activity")
-        print(f"🔎 Found {len(articles)} event containers")
+        soup = BeautifulSoup(response.text, "html.parser")
+        event_blocks = soup.select("article.m-b-20")
+        print(f"🔎 Found {len(event_blocks)} event containers")
 
         events = []
-        for article in articles:
-            time_tag = article.select_one("p.pull-right")
-            name_tag = article.select_one("h4, .montserrat")
-            desc_tag = article.select_one("p > strong")
+        for block in event_blocks:
+            try:
+                time_el = block.select_one("p.pull-right")
+                title_el = block.select_one("h4.montserrat")
+                details_el = block.select_one("p > strong")
 
-            if not name_tag or not desc_tag:
-                print("⚠️ Missing name or description, skipping event.")
+                if not (time_el and title_el and details_el):
+                    continue
+
+                time_str = time_el.get_text(strip=True)
+                timestamp = datetime.strptime(time_str, "%I:%M %p").replace(year=datetime.now().year).isoformat()
+
+                details = details_el.get_text(strip=True)
+                boat_name = title_el.get_text(strip=True)
+                uid = normalize_boat_name(boat_name)
+
+                events.append({
+                    "timestamp": timestamp,
+                    "event": title_el.get_text(strip=True),
+                    "boat": boat_name,
+                    "uid": uid,
+                    "details": details
+                })
+            except Exception as e:
+                print(f"⚠️ Error parsing event block: {e}")
                 continue
 
-            if time_tag:
-                raw_time = time_tag.get_text(strip=True).replace("@", "")
-                try:
-                    timestamp = datetime.strptime(raw_time, "%I:%M %p").replace(
-                        year=datetime.now().year,
-                        month=datetime.now().month,
-                        day=datetime.now().day
-                    ).isoformat()
-                except Exception:
-                    timestamp = datetime.now().isoformat()
-            else:
-                timestamp = datetime.now().isoformat()
-
-            boat = name_tag.get_text(strip=True)
-            desc = desc_tag.get_text(strip=True)
-            uid = normalize(boat)
-
-            event_type = "Other"
-            if "released" in desc.lower(): event_type = "Released"
-            elif "boated" in desc.lower(): event_type = "Boated"
-            elif "pulled hook" in desc.lower(): event_type = "Pulled Hook"
-            elif "wrong species" in desc.lower(): event_type = "Wrong Species"
-
-            print(f"✅ Parsed event: {timestamp} | {event_type} | {boat} | {desc}")
-
-            events.append({
-                "timestamp": timestamp,
-                "event": event_type,
-                "boat": boat,
-                "uid": uid,
-                "details": desc
-            })
-
-        path = get_cache_path(tournament, "events")
-        with open(path, "w") as f:
+        print(f"✅ Saved {len(events)} events for {name}")
+        os.makedirs(f"data/{name}", exist_ok=True)
+        with open(f"data/{name}/events.json", "w") as f:
             json.dump(events, f, indent=2)
+        return events
 
-        print(f"✅ Saved {len(events)} events for {tournament}")
     except Exception as e:
-        print(f"❌ Failed to scrape events for {tournament}: {e}")
+        print(f"❌ Error scraping events for {name}: {e}")
+        return []
 
 
 # === Full Scrape ===

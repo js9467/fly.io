@@ -75,7 +75,7 @@ def scrape_participants(tournament_name, participants_url):
     except Exception as e:
         print(f"❌ Error scraping participants for {tournament_name}: {e}")
 
-def scrape_events(tournament, url):
+def scrape_events(tournament, url, participants):
     try:
         print(f"📡 Scraping events for {tournament} from {url}")
         html = requests.get(url, timeout=20).text

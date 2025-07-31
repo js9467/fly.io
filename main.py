@@ -1,199 +1,144 @@
-from flask import Flask, jsonify
-from bs4 import BeautifulSoup
-from datetime import datetime
-from dateutil import parser as date_parser
 import os
 import json
+import time
+import threading
+from flask import Flask, jsonify, send_from_directory
 import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
 
 app = Flask(__name__)
+DATA_DIR = "/data"
 
-PERSIST_DIR = "/app/persist"
-CACHE_DIR = os.path.join(PERSIST_DIR, "cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
+SETTINGS_URL = "https://js9467.github.io/Brtourney/settings.json"
 
-def normalize_boat_name(name):
-    return name.lower().replace(" ", "_").replace("’", "").replace("'", "").replace("&", "and")
-
-def get_cache_path(tournament, filename):
-    folder = os.path.join(CACHE_DIR, normalize_boat_name(tournament))
-    os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, filename)
-
-def load_cache():
-    path = os.path.join(CACHE_DIR, "cache_meta.json")
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return {}
-
-def save_cache(data):
-    path = os.path.join(CACHE_DIR, "cache_meta.json")
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-def is_cache_fresh(cache, key, minutes=2):
-    ts = cache.get(key, {}).get("last_scraped")
-    if not ts:
-        return False
-    last = date_parser.parse(ts)
-    return (datetime.now() - last).total_seconds() < minutes * 60
+def normalize(name):
+    return ''.join(c for c in name.lower().replace(" ", "_") if c.isalnum() or c == "_")
 
 def load_settings():
     try:
-        return requests.get("https://js9467.github.io/Brtourney/settings.json").json()
-    except:
+        response = requests.get(SETTINGS_URL, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"❌ Failed to load settings: {e}")
         return {}
 
-def fetch_page_html(url, selector):
-    res = requests.get(url, timeout=20)
-    if not res.ok:
-        raise Exception("❌ Failed to fetch events page")
-    return res.text
-
-def scrape_participants(tournament):
-    out = {}
+def scrape_participants(uid, url):
     try:
-        settings = load_settings()
-        key = next((k for k in settings if normalize_boat_name(k) == normalize_boat_name(tournament)), None)
-        if not key:
-            return out
-        url = settings[key]["participants"]
-        html = requests.get(url).text
-        soup = BeautifulSoup(html, "html.parser")
+        res = requests.get(url, timeout=15)
+        soup = BeautifulSoup(res.text, "html.parser")
+        boats = []
 
-        for div in soup.select("div.participant-card"):
-            name = div.select_one("h4")
-            typ = div.select_one("p.text-xs")
-            if not name:
+        for div in soup.select("div.row > div.col-md-4"):
+            name_tag = div.select_one("h4")
+            if not name_tag:
                 continue
-            boat = name.text.strip()
-            ptype = typ.text.strip() if typ else ""
-            if ptype.lower() not in ["boat", ""]:
+            name = name_tag.get_text(strip=True)
+            if not name or name.lower() in ["angler", "junior angler"]:
                 continue
-            uid = normalize_boat_name(boat)
-            out[uid] = {
+
+            boat_name = name
+            boat_type = "Boat"
+            uid = normalize(boat_name)
+
+            img = div.select_one("img")
+            img_url = img["src"] if img else None
+            if img_url and img_url.startswith("/"):
+                img_url = "https://www.reeltimeapps.com" + img_url
+
+            boats.append({
+                "boat": boat_name,
+                "type": boat_type,
                 "uid": uid,
-                "boat": boat,
-                "type": ptype,
-                "image_path": f"/static/images/boats/{uid}.jpg"
-            }
+                "image_path": img_url or ""
+            })
 
-        path = get_cache_path(tournament, "participants.json")
-        with open(path, "w") as f:
-            json.dump(list(out.values()), f, indent=2)
+        out_path = os.path.join(DATA_DIR, f"{uid}_participants.json")
+        with open(out_path, "w") as f:
+            json.dump(boats, f, indent=2)
+        print(f"✅ {len(boats)} participants saved to {out_path}")
+        return boats
     except Exception as e:
-        print(f"❌ Failed to scrape participants: {e}")
-    return out
+        print(f"❌ Error scraping participants: {e}")
+        return []
 
-def scrape_events(force=False, tournament=None):
-    cache = load_cache()
+def scrape_events(uid, url):
+    try:
+        res = requests.get(url, timeout=15)
+        soup = BeautifulSoup(res.text, "html.parser")
+        events = []
+
+        for item in soup.select("li.event"):
+            ts_tag = item.select_one("p.pull-right")
+            boat_tag = item.select_one("h4.montserrat")
+            details_tag = item.select_one("p > strong")
+
+            if not (ts_tag and boat_tag and details_tag):
+                continue
+
+            raw_ts = ts_tag.get_text(strip=True)
+            boat = boat_tag.get_text(strip=True)
+            details = details_tag.get_text(strip=True)
+
+            ts = datetime.strptime(raw_ts, "%I:%M %p").replace(year=2025, month=6, day=14)
+            event_type = "Boated" if "boated" in details.lower() else (
+                         "Released" if "released" in details.lower() else "Other")
+
+            events.append({
+                "timestamp": ts.isoformat(),
+                "event": event_type,
+                "boat": boat,
+                "uid": normalize(boat),
+                "details": details
+            })
+
+        out_path = os.path.join(DATA_DIR, f"{uid}_events.json")
+        with open(out_path, "w") as f:
+            json.dump(events, f, indent=2)
+        print(f"✅ {len(events)} events saved to {out_path}")
+        return events
+    except Exception as e:
+        print(f"❌ Error scraping events: {e}")
+        return []
+
+def scrape_all():
     settings = load_settings()
-    results = {}
+    for name, data in settings.items():
+        if not isinstance(data, dict): continue
+        uid = normalize(name)
 
-    for tourney_name, info in settings.items():
-        if not isinstance(info, dict) or not info.get("events"):
-            results[tourney_name] = "❌ Skipped: invalid entry"
-            continue
-
-        normalized = normalize_boat_name(tourney_name)
-        if tournament and normalize_boat_name(tournament) != normalized:
-            continue
-
-        cache_key = f"events_{normalized}"
-        events_file = get_cache_path(tourney_name, "events.json")
-        if not force and is_cache_fresh(cache, cache_key, 2):
-            results[tourney_name] = f"✅ Cache fresh"
-            continue
-
-        try:
-            html = fetch_page_html(info["events"], "article")
-            soup = BeautifulSoup(html, "html.parser")
-            participants_file = get_cache_path(tourney_name, "participants.json")
-            participants = {}
-            if os.path.exists(participants_file):
-                with open(participants_file) as f:
-                    participants = {p["uid"]: p for p in json.load(f)}
-
-            events = []
-            seen = set()
-            for article in soup.select("article.m-b-20, article.entry, div.activity, li.event, div.feed-item"):
-                time_tag = article.select_one("p.pull-right")
-                name_tag = article.select_one("h4.montserrat")
-                desc_tag = article.select_one("p > strong")
-                if not time_tag or not name_tag or not desc_tag:
-                    continue
-
-                raw = time_tag.get_text(strip=True).replace("@", "").strip()
-                try:
-                    ts = date_parser.parse(raw).replace(year=datetime.now().year).isoformat()
-                except:
-                    continue
-
-                boat = name_tag.get_text(strip=True)
-                desc = desc_tag.get_text(strip=True)
-                uid = normalize_boat_name(boat)
-
-                if uid in participants:
-                    boat = participants[uid]["boat"]
-
-                if "released" in desc.lower():
-                    event_type = "Released"
-                elif "boated" in desc.lower():
-                    event_type = "Boated"
-                elif "pulled hook" in desc.lower():
-                    event_type = "Pulled Hook"
-                elif "wrong species" in desc.lower():
-                    event_type = "Wrong Species"
-                else:
-                    event_type = "Other"
-
-                key = f"{uid}_{event_type}_{ts}"
-                if key in seen:
-                    continue
-                seen.add(key)
-
-                events.append({
-                    "timestamp": ts,
-                    "event": event_type,
-                    "boat": boat,
-                    "uid": uid,
-                    "details": desc
-                })
-
-            events.sort(key=lambda e: e["timestamp"])
-            with open(events_file, "w") as f:
-                json.dump(events, f, indent=2)
-
-            cache[cache_key] = {"last_scraped": datetime.now().isoformat()}
-            results[tourney_name] = f"{len(events)} events saved."
-
-        except Exception as e:
-            print(f"❌ Error scraping {tourney_name}: {e}")
-            results[tourney_name] = "❌ Failed"
-
-    save_cache(cache)
-    return results
+        if "participants" in data and data["participants"]:
+            scrape_participants(uid, data["participants"])
+        if "events" in data and data["events"]:
+            scrape_events(uid, data["events"])
 
 @app.route("/scrape/participants")
-def route_participants():
-    settings = load_settings()
-    output = {}
-    for tournament in settings:
-        if not isinstance(settings[tournament], dict):
-            continue
-        out = scrape_participants(tournament)
-        output[tournament] = f"{len(out)} participants saved."
-    return jsonify(output)
+def scrape_participants_route():
+    scrape_all()
+    return jsonify({"status": "Participants scraped"})
 
 @app.route("/scrape/events")
-def route_events():
-    out = scrape_events(force=True)
-    return jsonify(out)
+def scrape_events_route():
+    scrape_all()
+    return jsonify({"status": "Events scraped"})
 
-@app.route("/")
-def index():
-    return "✅ Tournament Scraper Running"
+@app.route("/data/<filename>")
+def serve_data(filename):
+    return send_from_directory(DATA_DIR, filename)
+
+def schedule_scrape():
+    while True:
+        print("⏱ Auto-scraping every 60s...")
+        scrape_all()
+        time.sleep(60)
+
+@app.before_first_request
+def on_start():
+    print("🚀 Initial scrape on startup")
+    threading.Thread(target=schedule_scrape, daemon=True).start()
 
 if __name__ == "__main__":
+    os.makedirs(DATA_DIR, exist_ok=True)
+    print("📦 Starting scraper service...")
+    scrape_all()  # Optional: scrape immediately when launching
     app.run(host="0.0.0.0", port=8080)

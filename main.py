@@ -1,4 +1,3 @@
-
 from flask import Flask, jsonify, send_from_directory
 from bs4 import BeautifulSoup
 import requests
@@ -9,11 +8,19 @@ from urllib.parse import urljoin
 
 app = Flask(__name__)
 
-# Fly-mounted volume paths
-DATA_FOLDER = "/app/data"
-IMAGE_FOLDER = "/app/static/images/boats"
+# Unified volume root
+VOLUME_ROOT = "/app/persist"
+DATA_FOLDER = os.path.join(VOLUME_ROOT, "data")
+IMAGE_FOLDER = os.path.join(VOLUME_ROOT, "images", "boats")
+
+# Ensure all necessary folders exist
 os.makedirs(DATA_FOLDER, exist_ok=True)
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
+os.makedirs("/app/static/images", exist_ok=True)
+
+# Symlink static/images/boats -> persistent image folder (for serving images)
+if not os.path.exists("/app/static/images/boats"):
+    os.symlink(IMAGE_FOLDER, "/app/static/images/boats")
 
 SETTINGS_URL = "https://js9467.github.io/Brtourney/settings.json"
 
@@ -27,7 +34,7 @@ def fetch_settings():
         res = requests.get(SETTINGS_URL, timeout=10)
         res.raise_for_status()
         data = res.json()
-        print(f"✅ Loaded settings for: {list(data.keys())}")
+        print(f"✅ Loaded settings: {list(data.keys())}")
         return data
     except Exception as e:
         print(f"❌ Error fetching settings: {e}")
@@ -52,7 +59,7 @@ def download_image(img_url, uid):
                     f.write(resp.content)
         return f"/static/images/boats/{uid}.{ext}"
     except Exception as e:
-        print(f"❌ Image download failed for {uid}: {e}")
+        print(f"❌ Failed to download image for {uid}: {e}")
         return "/static/images/boats/default.jpg"
 
 
@@ -110,6 +117,7 @@ def scrape_all_participants():
 
             path = os.path.join(DATA_FOLDER, f"{normalize(key)}_participants.json")
             save_json(path, {"participants": participants, "timestamp": datetime.utcnow().isoformat()})
+
             results[key] = f"{len(participants)} boats saved."
         except Exception as e:
             results[key] = f"❌ Failed: {str(e)}"

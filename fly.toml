@@ -7,7 +7,7 @@ primary_region = "atl"
 PORT = "8080"
 
 [[mounts]]
-source = "data"
+source = "vol_vdm5xp89n3dqgn3v"
 destination = "/app/persist"
 
 [experimental]

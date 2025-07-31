@@ -75,34 +75,42 @@ def scrape_participants(tournament_name, participants_url):
     except Exception as e:
         print(f"❌ Error scraping participants for {tournament_name}: {e}")
 
-def scrape_events(tournament_name, event_url, participants):
+def scrape_events(tournament, url):
     try:
-        html = requests.get(event_url, timeout=20).text
+        print(f"📡 Scraping events for {tournament} from {url}")
+        html = requests.get(url, timeout=20).text
         soup = BeautifulSoup(html, 'html.parser')
-        new_events = []
-        seen = set()
 
-        for article in soup.select("article, div.feed-item, li.event, div.activity"):
+        # Debug: log number of matched articles
+        articles = soup.select("article, div.feed-item, li.event, div.activity")
+        print(f"🔎 Found {len(articles)} event containers")
+
+        events = []
+        for article in articles:
             time_tag = article.select_one("p.pull-right")
             name_tag = article.select_one("h4, .montserrat")
             desc_tag = article.select_one("p > strong")
 
             if not name_tag or not desc_tag:
+                print("⚠️ Missing name or description, skipping event.")
                 continue
 
-            raw_time = time_tag.get_text(strip=True).replace("@", "") if time_tag else ""
-            try:
-                timestamp = date_parser.parse(raw_time).replace(year=datetime.now().year).isoformat()
-            except:
+            if time_tag:
+                raw_time = time_tag.get_text(strip=True).replace("@", "")
+                try:
+                    timestamp = datetime.strptime(raw_time, "%I:%M %p").replace(
+                        year=datetime.now().year,
+                        month=datetime.now().month,
+                        day=datetime.now().day
+                    ).isoformat()
+                except Exception:
+                    timestamp = datetime.now().isoformat()
+            else:
                 timestamp = datetime.now().isoformat()
 
             boat = name_tag.get_text(strip=True)
             desc = desc_tag.get_text(strip=True)
             uid = normalize(boat)
-
-            # Normalize from participants if match found
-            if uid in participants:
-                boat = participants[uid]["boat"]
 
             event_type = "Other"
             if "released" in desc.lower(): event_type = "Released"
@@ -110,12 +118,9 @@ def scrape_events(tournament_name, event_url, participants):
             elif "pulled hook" in desc.lower(): event_type = "Pulled Hook"
             elif "wrong species" in desc.lower(): event_type = "Wrong Species"
 
-            key = f"{uid}_{event_type}_{timestamp}"
-            if key in seen:
-                continue
-            seen.add(key)
+            print(f"✅ Parsed event: {timestamp} | {event_type} | {boat} | {desc}")
 
-            new_events.append({
+            events.append({
                 "timestamp": timestamp,
                 "event": event_type,
                 "boat": boat,
@@ -123,11 +128,14 @@ def scrape_events(tournament_name, event_url, participants):
                 "details": desc
             })
 
-        with open(get_cache_path(tournament_name, "events"), "w") as f:
-            json.dump(new_events, f, indent=2)
-        print(f"✅ Saved {len(new_events)} events for {tournament_name}")
+        path = get_cache_path(tournament, "events")
+        with open(path, "w") as f:
+            json.dump(events, f, indent=2)
+
+        print(f"✅ Saved {len(events)} events for {tournament}")
     except Exception as e:
-        print(f"❌ Error scraping events for {tournament_name}: {e}")
+        print(f"❌ Failed to scrape events for {tournament}: {e}")
+
 
 # === Full Scrape ===
 def scrape_all_now():

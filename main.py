@@ -12,8 +12,10 @@ DATA_DIR = "/data"
 
 SETTINGS_URL = "https://js9467.github.io/Brtourney/settings.json"
 
+
 def normalize(name):
     return ''.join(c for c in name.lower().replace(" ", "_") if c.isalnum() or c == "_")
+
 
 def load_settings():
     try:
@@ -22,6 +24,7 @@ def load_settings():
     except Exception as e:
         print(f"❌ Failed to load settings: {e}")
         return {}
+
 
 def scrape_participants(uid, url):
     try:
@@ -62,6 +65,7 @@ def scrape_participants(uid, url):
         print(f"❌ Error scraping participants: {e}")
         return []
 
+
 def scrape_events(uid, url):
     try:
         res = requests.get(url, timeout=15)
@@ -101,10 +105,12 @@ def scrape_events(uid, url):
         print(f"❌ Error scraping events: {e}")
         return []
 
+
 def scrape_all():
     settings = load_settings()
     for name, data in settings.items():
-        if not isinstance(data, dict): continue
+        if not isinstance(data, dict):
+            continue
         uid = normalize(name)
 
         if "participants" in data and data["participants"]:
@@ -112,37 +118,47 @@ def scrape_all():
         if "events" in data and data["events"]:
             scrape_events(uid, data["events"])
 
+
 @app.route("/scrape/participants")
 def scrape_participants_route():
     scrape_all()
     return jsonify({"status": "Participants scraped"})
+
 
 @app.route("/scrape/events")
 def scrape_events_route():
     scrape_all()
     return jsonify({"status": "Events scraped"})
 
+
 @app.route("/data/<filename>")
 def serve_data(filename):
     return send_from_directory(DATA_DIR, filename)
 
-def schedule_scrape():
-    while True:
-        print("⏱ Auto-scraping every 60s...")
-        scrape_all()
-        time.sleep(60)
 
-@app.before_serving
-async def startup():
-    await scrape_participants()
-    await scrape_events()
+def periodic_scrape():
+    count = 0
+    while True:
+        print("⏱ Periodic scrape starting...")
+        settings = load_settings()
+        for name, data in settings.items():
+            if not isinstance(data, dict):
+                continue
+            uid = normalize(name)
+            if count % 240 == 0 and "participants" in data and data["participants"]:
+                scrape_participants(uid, data["participants"])
+            if "events" in data and data["events"]:
+                scrape_events(uid, data["events"])
+        count += 1
+        time.sleep(90)
+
 
 def on_start():
     print("🚀 Initial scrape on startup")
-    threading.Thread(target=schedule_scrape, daemon=True).start()
+    threading.Thread(target=periodic_scrape, daemon=True).start()
+
 
 if __name__ == "__main__":
     os.makedirs(DATA_DIR, exist_ok=True)
-    print("📦 Starting scraper service...")
-    scrape_all()  # Optional: scrape immediately when launching
+    on_start()
     app.run(host="0.0.0.0", port=8080)

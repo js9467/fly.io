@@ -152,12 +152,14 @@ def scrape_all_now():
     settings = load_settings()
     for name, entry in settings.items():
         if not isinstance(entry, dict):
-            continue  # ⚠ Skip nulls or non-dict values
+            print(f"⏭ Skipping invalid entry: {name}")
+            continue
         if entry.get("participants"):
             scrape_participants(name, entry["participants"])
         if entry.get("events"):
             scrape_events(name, entry["events"])
     print("✅ Initial scrape complete.")
+
 
 
 def background_scheduler():
@@ -166,7 +168,7 @@ def background_scheduler():
         settings = load_settings()
         for name, entry in settings.items():
             if not isinstance(entry, dict):
-                continue  # ⚠ Skip null entries
+                continue
             p_path = get_cache_path(name, "participants")
             e_path = get_cache_path(name, "events")
 
@@ -175,6 +177,7 @@ def background_scheduler():
             if entry.get("events") and not is_fresh(e_path, 1.5):
                 scrape_events(name, entry["events"])
         time.sleep(30)
+
 
 
 @app.route("/")

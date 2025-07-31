@@ -57,55 +57,95 @@ def scrape_participants(tournament, url):
     except Exception as e:
         print(f"❌ Failed to scrape participants for {tournament}: {e}")
 
-def scrape_events(tournament, url):
+from dateutil import parser as date_parser
+
+def scrape_events(tournament, force=False):
     try:
-        html = requests.get(url, timeout=20).text
+        events_file = get_cache_path(tournament, "events")
+        if not force and is_fresh(events_file, 1.5):
+            with open(events_file) as f:
+                return json.load(f)
+
+        print(f"📡 Scraping events for {tournament}")
+        remote = requests.get(SETTINGS_URL).json()
+        key = next((k for k in remote if normalize(k) == normalize(tournament)), None)
+        if not key:
+            print(f"⚠️ Tournament {tournament} not found in settings.json")
+            return []
+
+        events_url = remote[key].get("events")
+        if not events_url:
+            print(f"⚠️ No events URL for tournament {tournament}")
+            return []
+
+        html = requests.get(events_url, timeout=20).text
         soup = BeautifulSoup(html, 'html.parser')
+
+        participants = {}
+        p_path = get_cache_path(tournament, "participants")
+        if os.path.exists(p_path):
+            with open(p_path) as f:
+                participants = {p["uid"]: p for p in json.load(f)}
+
         events = []
-        for article in soup.select("article, div.feed-item, li.event, div.activity"):
+        seen = set()
+
+        for article in soup.select("article.m-b-20, article.entry, div.activity, li.event, div.feed-item"):
             time_tag = article.select_one("p.pull-right")
-            name_tag = article.select_one("h4, .montserrat")
+            name_tag = article.select_one("h4.montserrat")
             desc_tag = article.select_one("p > strong")
-            if not name_tag or not desc_tag:
+
+            if not time_tag or not name_tag or not desc_tag:
                 continue
 
-            if time_tag:
+            try:
                 raw_time = time_tag.get_text(strip=True).replace("@", "")
-                try:
-                    timestamp = datetime.strptime(raw_time, "%I:%M %p").replace(
-                        year=datetime.now().year,
-                        month=datetime.now().month,
-                        day=datetime.now().day
-                    ).isoformat()
-                except:
-                    timestamp = datetime.now().isoformat()
-            else:
-                timestamp = datetime.now().isoformat()
+                ts = date_parser.parse(raw_time).replace(year=datetime.now().year).isoformat()
+            except:
+                continue
 
             boat = name_tag.get_text(strip=True)
             desc = desc_tag.get_text(strip=True)
             uid = normalize(boat)
 
-            event_type = "Other"
-            if "released" in desc.lower(): event_type = "Released"
-            elif "boated" in desc.lower(): event_type = "Boated"
-            elif "pulled hook" in desc.lower(): event_type = "Pulled Hook"
-            elif "wrong species" in desc.lower(): event_type = "Wrong Species"
+            if uid in participants:
+                boat = participants[uid]["boat"]
+
+            if "released" in desc.lower():
+                event_type = "Released"
+            elif "boated" in desc.lower():
+                event_type = "Boated"
+            elif "pulled hook" in desc.lower():
+                event_type = "Pulled Hook"
+            elif "wrong species" in desc.lower():
+                event_type = "Wrong Species"
+            else:
+                event_type = "Other"
+
+            key = f"{uid}_{event_type}_{ts}"
+            if key in seen:
+                continue
+            seen.add(key)
 
             events.append({
-                "timestamp": timestamp,
+                "timestamp": ts,
                 "event": event_type,
                 "boat": boat,
                 "uid": uid,
                 "details": desc
             })
 
-        path = get_cache_path(tournament, "events")
-        with open(path, "w") as f:
+        events.sort(key=lambda e: e["timestamp"])
+        with open(events_file, "w") as f:
             json.dump(events, f, indent=2)
-        print(f"✅ Scraped {len(events)} events for {tournament}")
+
+        print(f"✅ Saved {len(events)} events for {tournament}")
+        return events
+
     except Exception as e:
-        print(f"❌ Failed to scrape events for {tournament}: {e}")
+        print(f"❌ Error scraping events for {tournament}: {e}")
+        return []
+
 
 def scrape_all_now():
     print("🚀 Running initial full scrape")

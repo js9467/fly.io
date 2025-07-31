@@ -1,213 +1,315 @@
 import os
 import json
-import requests
-import threading
+import re
 import time
+import requests
 from datetime import datetime
-from flask import Flask, jsonify, send_from_directory
+from threading import Thread
+from flask import Flask, jsonify
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-DATA_DIR = "data"
-STATIC_IMAGE_PATH = "/static/images/boats"
-
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
-
-# === Utility Functions ===
-def normalize(text):
-    return text.lower().replace(" ", "_").replace("'", "").replace("\"", "")
-
-def get_cache_path(tournament, name):
-    safe_name = normalize(tournament)
-    return os.path.join(DATA_DIR, f"{safe_name}_{name}.json")
-
-def load_settings():
-    r = requests.get("https://js9467.github.io/Brtourney/settings.json")
-    return r.json()
-
-# === Scraping Functions ===
-import os
-import requests
-from bs4 import BeautifulSoup
-import json
-from datetime import datetime
+# Helper Functions
 
 def normalize_boat_name(name):
-    return ''.join(c.lower() if c.isalnum() else '_' for c in name).strip('_')
+    return re.sub(r'\W+', '_', name.lower()).strip('_')
 
-def scrape_participants(name, url):
-    print(f"📡 Scraping participants for {name} from {url}")
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+def get_cache_path(tournament, name):
+    os.makedirs(f"cache/{tournament}", exist_ok=True)
+    return f"cache/{tournament}/{name}"
+
+def fetch_page_html(url, selector):
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"⚠️ Failed to fetch participants for {name}")
-            return []
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        participants = []
-        cards = soup.select("div.card")  # Confirm this still matches
-
-        for card in cards:
-            boat = card.select_one("h4")
-            if boat:
-                boat_name = boat.get_text(strip=True)
-                if any(x in boat_name.lower() for x in ["angler", "junior", "lady", "mate"]):
-                    continue  # Skip non-boat entries
-                uid = normalize_boat_name(boat_name)
-                type_ = card.select_one("div.card-text")
-                participants.append({
-                    "uid": uid,
-                    "boat": boat_name,
-                    "type": type_.get_text(strip=True) if type_ else "",
-                    "image_path": f"/static/images/boats/{uid}.jpg"
-                })
-
-        print(f"✅ Scraped {len(participants)} participants for {name}")
-        os.makedirs(f"data/{name}", exist_ok=True)
-        with open(f"data/{name}/participants.json", "w") as f:
-            json.dump(participants, f, indent=2)
-        return participants
-
+        print(f"🌐 Fetching: {url}")
+        res = requests.get(url, timeout=20)
+        if res.status_code == 200:
+            return res.text
     except Exception as e:
-        print(f"❌ Error scraping participants for {name}: {e}")
+        print(f"⚠️ Error fetching {url}: {e}")
+    return ""
+
+def fetch_with_scraperapi(url):
+    try:
+        print(f"🔒 Fetching via ScraperAPI: {url}")
+        res = requests.get(url, timeout=30)
+        if res.status_code == 200:
+            return res.text
+    except Exception as e:
+        print(f"⚠️ Error using ScraperAPI: {e}")
+    return ""
+
+def cache_boat_image(boat_name, image_url):
+    uid = normalize_boat_name(boat_name)
+    folder = "static/images/boats"
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{uid}.jpg")
+    try:
+        r = requests.get(image_url, timeout=10)
+        if r.status_code == 200:
+            with open(path, "wb") as f:
+                f.write(r.content)
+            return f"/static/images/boats/{uid}.jpg"
+    except:
+        pass
+    return "/static/images/boats/default.jpg"
+
+def get_current_tournament():
+    return os.environ.get("TOURNAMENT", "Big Rock")
+
+def get_all_tournaments():
+    try:
+        data = requests.get("https://js9467.github.io/Brtourney/settings.json").json()
+        return [k for k in data if isinstance(data[k], dict) and "events" in data[k]]
+    except:
         return []
 
-def scrape_events(name, url, participants):
-    print(f"📡 Scraping events for {name} from {url}")
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+# Scraper Functions (unchanged)
+def scrape_participants(force=False):
+    cache = load_cache()
+    tournament = get_current_tournament()
+    participants_file = get_cache_path(tournament, "participants.json")
+
+    if not force and is_cache_fresh(cache, f"{tournament}_participants", 1440):
+        print("✅ Participant cache is fresh — skipping scrape.")
+        if os.path.exists(participants_file):
+            with open(participants_file, "r") as f:
+                return json.load(f)
+        return []
+
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"⚠️ Failed to fetch events for {name}")
-            return []
+        settings_url = "https://js9467.github.io/Brtourney/settings.json"
+        settings = requests.get(settings_url, timeout=30).json()
+        matching_key = next((k for k in settings if k.lower() == tournament.lower()), None)
+        if not matching_key:
+            raise Exception(f"Tournament '{tournament}' not found in settings.json")
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        event_blocks = soup.select("article.m-b-20")
-        print(f"🔎 Found {len(event_blocks)} event containers")
+        participants_url = settings[matching_key].get("participants")
+        if not participants_url:
+            raise Exception(f"No participants URL found for {matching_key}")
 
-        events = []
-        for block in event_blocks:
-            try:
-                time_el = block.select_one("p.pull-right")
-                title_el = block.select_one("h4.montserrat")
-                details_el = block.select_one("p > strong")
+        print(f"📡 Scraping participants from: {participants_url}")
 
-                if not (time_el and title_el and details_el):
-                    continue
+        existing_participants = {}
+        if os.path.exists(participants_file):
+            with open(participants_file, "r") as f:
+                for p in json.load(f):
+                    existing_participants[p["uid"]] = p
 
-                time_str = time_el.get_text(strip=True)
-                timestamp = datetime.strptime(time_str, "%I:%M %p").replace(year=datetime.now().year).isoformat()
+        html = fetch_with_scraperapi(participants_url)
+        if not html:
+            raise Exception("No HTML returned from ScraperAPI")
 
-                details = details_el.get_text(strip=True)
-                boat_name = title_el.get_text(strip=True)
-                uid = normalize_boat_name(boat_name)
+        with open("debug_participants.html", "w", encoding="utf-8") as f:
+            f.write(html)
 
-                events.append({
-                    "timestamp": timestamp,
-                    "event": title_el.get_text(strip=True),
-                    "boat": boat_name,
-                    "uid": uid,
-                    "details": details
-                })
-            except Exception as e:
-                print(f"⚠️ Error parsing event block: {e}")
+        soup = BeautifulSoup(html, 'html.parser')
+        updated_participants = {}
+        seen_boats = set()
+        download_tasks = []
+
+        for article in soup.select("article.post.format-image"):
+            name_tag = article.select_one("h2.post-title")
+            type_tag = article.select_one("ul.post-meta li")
+            img_tag = article.select_one("img")
+
+            if not name_tag:
                 continue
 
-        print(f"✅ Saved {len(events)} events for {name}")
-        os.makedirs(f"data/{name}", exist_ok=True)
-        with open(f"data/{name}/events.json", "w") as f:
+            boat_name = name_tag.get_text(strip=True)
+            if ',' in boat_name or boat_name.lower() in seen_boats:
+                continue
+
+            boat_type = type_tag.get_text(strip=True) if type_tag else ""
+            uid = normalize_boat_name(boat_name)
+            seen_boats.add(boat_name.lower())
+
+            image_url = img_tag['src'] if img_tag and 'src' in img_tag.attrs else None
+            image_path = existing_participants.get(uid, {}).get("image_path", "")
+            local_path = image_path[1:] if image_path.startswith('/') else image_path
+
+            force_download = (
+                uid not in existing_participants or
+                not image_path or
+                not os.path.exists(local_path)
+            )
+
+            if force_download:
+                if image_url:
+                    download_tasks.append((uid, boat_name, image_url))
+                    image_path = ""
+                else:
+                    image_path = "/static/images/boats/default.jpg"
+
+            updated_participants[uid] = {
+                "uid": uid,
+                "boat": boat_name,
+                "type": boat_type,
+                "image_path": image_path
+            }
+
+        if download_tasks:
+            print(f"📸 Downloading {len(download_tasks)} new boat images...")
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                futures = {
+                    executor.submit(cache_boat_image, bname, url): uid
+                    for uid, bname, url in download_tasks
+                }
+                for future in futures:
+                    uid = futures[future]
+                    try:
+                        result_path = future.result()
+                        updated_participants[uid]["image_path"] = result_path
+                    except Exception as e:
+                        print(f"❌ Error downloading image for {uid}: {e}")
+                        updated_participants[uid]["image_path"] = "/static/images/boats/default.jpg"
+
+        updated_list = list(updated_participants.values())
+        if updated_list != list(existing_participants.values()):
+            with open(participants_file, "w") as f:
+                json.dump(updated_list, f, indent=2)
+            print(f"✅ Updated and saved {len(updated_list)} participants")
+        else:
+            print(f"✅ No changes detected — {len(updated_list)} participants up-to-date")
+
+        cache[f"{tournament}_participants"] = {"last_scraped": datetime.now().isoformat()}
+        save_cache(cache)
+        return updated_list
+
+    except Exception as e:
+        print(f"⚠️ Error scraping participants: {e}")
+        return []
+
+
+def scrape_events(force=False, tournament=None):
+    cache = load_cache()
+    settings = load_settings()
+    tournament = tournament or get_current_tournament()
+    events_file = get_cache_path(tournament, "events.json")
+
+    if not force and is_cache_fresh(cache, f"events_{tournament}", 2):
+        if os.path.exists(events_file):
+            with open(events_file) as f:
+                return json.load(f)
+        return []
+
+    try:
+        settings_url = "https://js9467.github.io/Brtourney/settings.json"
+        remote = requests.get(settings_url).json()
+        key = next((k for k in remote if normalize_boat_name(k) == normalize_boat_name(tournament)), None)
+        events_url = remote[key]["events"]
+
+        html = fetch_page_html(events_url, "article.m-b-20, article.entry, div.activity, li.event, div.feed-item")
+        soup = BeautifulSoup(html, 'html.parser')
+        events = []
+        seen = set()
+
+        participants_file = get_cache_path(tournament, "participants.json")
+        participants = {}
+        if os.path.exists(participants_file):
+            with open(participants_file) as f:
+                participants = {p["uid"]: p for p in json.load(f)}
+
+        for article in soup.select("article.m-b-20, article.entry, div.activity, li.event, div.feed-item"):
+            time_tag = article.select_one("p.pull-right")
+            name_tag = article.select_one("h4.montserrat")
+            desc_tag = article.select_one("p > strong")
+            if not time_tag or not name_tag or not desc_tag:
+                continue
+
+            raw = time_tag.get_text(strip=True).replace("@", "").strip()
+            try:
+                ts = date_parser.parse(raw).replace(year=datetime.now().year).isoformat()
+            except:
+                continue
+
+            boat = name_tag.get_text(strip=True)
+            desc = desc_tag.get_text(strip=True)
+            uid = normalize_boat_name(boat)
+
+            # Use participant boat name if found
+            if uid in participants:
+                boat = participants[uid]["boat"]
+
+            if "released" in desc.lower():
+                event_type = "Released"
+            elif "boated" in desc.lower():
+                event_type = "Boated"
+            elif "pulled hook" in desc.lower():
+                event_type = "Pulled Hook"
+            elif "wrong species" in desc.lower():
+                event_type = "Wrong Species"
+            else:
+                event_type = "Other"
+
+            # Deduplication check
+            key = f"{uid}_{event_type}_{ts}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            events.append({
+                "timestamp": ts,
+                "event": event_type,
+                "boat": boat,
+                "uid": uid,
+                "details": desc
+            })
+
+        events.sort(key=lambda e: e["timestamp"])
+        with open(events_file, "w") as f:
             json.dump(events, f, indent=2)
+
+        cache[f"events_{tournament}"] = {"last_scraped": datetime.now().isoformat()}
+        save_cache(cache)
         return events
 
     except Exception as e:
-        print(f"❌ Error scraping events for {name}: {e}")
+        print(f"❌ Error in scrape_events: {e}")
         return []
 
 
-# === Full Scrape ===
-def scrape_all_now():
-    print("🚀 Running initial full scrape")
-    settings = load_settings()
-
-    for name, entry in settings.items():
-        if not isinstance(entry, dict):
-            print(f"⏭ Skipping invalid entry: {name}")
-            continue
-
-        participants_url = entry.get("participants")
-        events_url = entry.get("events")
-        if not participants_url or not events_url:
-            print(f"⏭ Skipping {name} due to missing URLs")
-            continue
-
-        scrape_participants(name, participants_url)
-
-        participants_path = get_cache_path(name, "participants")
-        participants = {}
-        if os.path.exists(participants_path):
-            with open(participants_path) as f:
-                participants = {p["uid"]: p for p in json.load(f)}
-
-        print(f"📡 Scraping events for {name}")
-        scrape_events(name, events_url, participants)
-
-# === Background Tasks ===
-def background_scheduler():
-    def run():
-        while True:
-            try:
-                settings = load_settings()
-                for name, entry in settings.items():
-                    if not isinstance(entry, dict):
-                        continue
-                    events_url = entry.get("events")
-                    if not events_url:
-                        continue
-
-                    participants_path = get_cache_path(name, "participants")
-                    participants = {}
-                    if os.path.exists(participants_path):
-                        with open(participants_path) as f:
-                            participants = {p["uid"]: p for p in json.load(f)}
-
-                    scrape_events(name, events_url, participants)
-            except Exception as e:
-                print(f"Scheduler error: {e}")
-
-            time.sleep(90)  # every 90 seconds
-
-    threading.Thread(target=run, daemon=True).start()
-
-# === Flask Routes ===
 @app.route("/api/<tournament>/participants")
-def get_participants(tournament):
-    path = get_cache_path(tournament, "participants")
-    if os.path.exists(path):
-        with open(path) as f:
+def api_participants(tournament):
+    try:
+        with open(get_cache_path(tournament, "participants.json")) as f:
             return jsonify(json.load(f))
-    return jsonify([])
+    except:
+        return jsonify([])
 
 @app.route("/api/<tournament>/events")
-def get_events(tournament):
-    path = get_cache_path(tournament, "events")
-    if os.path.exists(path):
-        with open(path) as f:
+def api_events(tournament):
+    try:
+        with open(get_cache_path(tournament, "events.json")) as f:
             return jsonify(json.load(f))
-    return jsonify([])
+    except:
+        return jsonify([])
 
-@app.route("/static/images/boats/<path:filename>")
-def serve_image(filename):
-    return send_from_directory("static/images/boats", filename)
+def scrape_all_now():
+    print("🚀 Running initial full scrape")
+    for t in get_all_tournaments():
+        print(f"📡 Scraping participants for {t}")
+        scrape_participants(force=True)
+        print(f"📡 Scraping events for {t}")
+        scrape_events(force=True, tournament=t)
+
+def background_scheduler():
+    def event_loop():
+        while True:
+            for t in get_all_tournaments():
+                scrape_events(force=True, tournament=t)
+            time.sleep(90)
+
+    def participant_loop():
+        while True:
+            for t in get_all_tournaments():
+                scrape_participants(force=True)
+            time.sleep(21600)
+
+    Thread(target=event_loop, daemon=True).start()
+    Thread(target=participant_loop, daemon=True).start()
 
 if __name__ == "__main__":
     scrape_all_now()

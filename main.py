@@ -7,8 +7,12 @@ from datetime import datetime
 from urllib.parse import urljoin
 
 app = Flask(__name__)
-DATA_FOLDER = "data"
-IMAGE_FOLDER = "static/images/boats"
+
+# Fly volume paths
+DATA_FOLDER = "/app/data"
+IMAGE_FOLDER = "/app/static/images/boats"
+
+# Ensure folders exist
 os.makedirs(DATA_FOLDER, exist_ok=True)
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
 
@@ -20,7 +24,7 @@ def normalize(name):
 
 
 def fetch_settings():
-    return requests.get(SETTINGS_URL).json()
+    return requests.get(SETTINGS_URL, timeout=10).json()
 
 
 def save_json(path, data):
@@ -33,7 +37,7 @@ def download_image(img_url, uid):
         if not img_url:
             return "/static/images/boats/default.jpg"
         ext = img_url.split(".")[-1].split("?")[0]
-        file_path = f"{IMAGE_FOLDER}/{uid}.{ext}"
+        file_path = os.path.join(IMAGE_FOLDER, f"{uid}.{ext}")
         if not os.path.exists(file_path):
             resp = requests.get(img_url, timeout=10)
             if resp.status_code == 200:
@@ -68,7 +72,7 @@ def scrape_all_participants():
                 a_tag = div.find("a")
                 href = a_tag["href"] if a_tag else ""
                 if "/anglers/" in href:
-                    continue  # skip anglers
+                    continue
 
                 name_tag = div.select_one(".post-title")
                 type_tag = div.select_one(".post-meta li")
@@ -93,7 +97,6 @@ def scrape_all_participants():
 
             path = os.path.join(DATA_FOLDER, f"{normalize(key)}_participants.json")
             save_json(path, {"participants": participants, "timestamp": datetime.utcnow().isoformat()})
-
             results[key] = f"{len(participants)} boats saved."
         except Exception as e:
             results[key] = f"❌ Failed: {str(e)}"
@@ -116,22 +119,17 @@ def scrape_all_events():
             soup = BeautifulSoup(res.text, "html.parser")
             events = []
 
-            # ReelTimeApps event structure often uses .feed-list-item
             for el in soup.select(".feed-list-item, .event"):
-                # timestamp
                 time_tag = el.select_one(".feed-time, .time, .timestamp")
                 timestamp = time_tag.text.strip() if time_tag else datetime.utcnow().isoformat()
 
-                # boat
                 boat_tag = el.select_one(".feed-boat, .boat, .title")
                 boat = boat_tag.text.strip() if boat_tag else "Unknown"
                 uid = normalize(boat)
 
-                # details
                 details_tag = el.select_one(".feed-description, .details, p")
                 details = details_tag.text.strip() if details_tag else el.get_text(strip=True)
 
-                # classify event type
                 lower_details = details.lower()
                 if "released" in lower_details:
                     event_type = "Released"
@@ -144,9 +142,7 @@ def scrape_all_events():
                 else:
                     event_type = "Other"
 
-                # Try to parse timestamp into ISO
                 try:
-                    # ReelTime often uses format: '2:35 PM'
                     dt = datetime.strptime(timestamp, "%I:%M %p")
                     timestamp_iso = datetime.utcnow().replace(hour=dt.hour, minute=dt.minute, second=0, microsecond=0).isoformat()
                 except:
@@ -160,16 +156,13 @@ def scrape_all_events():
                     "details": details
                 })
 
-            # save JSON
             path = os.path.join(DATA_FOLDER, f"{normalize(key)}_events.json")
             save_json(path, {"events": events, "timestamp": datetime.utcnow().isoformat()})
-
             results[key] = f"{len(events)} events saved."
         except Exception as e:
             results[key] = f"❌ Failed: {str(e)}"
 
     return jsonify(results)
-
 
 
 @app.route("/data/<filename>")
